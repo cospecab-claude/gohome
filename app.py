@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""gohome: PC를 끌 때 G2Works 퇴근을 자동으로 찍는 상주 프로그램.
+"""gohome: PC를 켜면 출근, 끌 때 퇴근을 G2Works에 자동으로 찍는 상주 프로그램.
 
 실행 방법:
     gohome.exe              실행한 자리에서 트레이에 상주 (처음이면 설정 창, 시작 프로그램 등록)
@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 import config
 import credential
@@ -27,6 +28,8 @@ log = logging.getLogger("gohome")
 TITLE = "gohome"
 MUTEX_NAME = "Local\\gohome_single_instance"
 ERROR_ALREADY_EXISTS = 183
+ATTEND_RETRIES = 4      # 출근 처리 재시도 횟수
+ATTEND_RETRY_SEC = 30   # 재시도 간격
 
 MB_OK = 0x0
 MB_YESNO = 0x4
@@ -40,7 +43,7 @@ IDYES = 6
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-_leave_lock = threading.Lock()
+_g2_lock = threading.Lock()
 
 
 def msgbox(text, flags=MB_OK | MB_ICONINFORMATION):
@@ -91,7 +94,7 @@ def show_pending_fail():
 
 def do_leave():
     """퇴근 처리. (성공 여부, 메시지)."""
-    with _leave_lock:
+    with _g2_lock:
         cred = credential.load()
         if cred is None:
             return False, "저장된 사번/비밀번호가 없습니다. 트레이 메뉴 > 설정 변경에서 입력해 주세요."
@@ -118,6 +121,45 @@ def on_shutdown():
         write_fail(message)
 
 
+# ---------- 출근 처리 ----------
+
+def auto_attend(icon):
+    """시작할 때 출근 처리. 네트워크 오류는 30초 간격으로 4번까지 재시도."""
+    if not config.load()["auto_attend"]:
+        log.info("출근 자동 처리 꺼짐")
+        return
+    cred = credential.load()
+    if cred is None:
+        return
+
+    for attempt in range(1 + ATTEND_RETRIES):
+        if attempt:
+            time.sleep(ATTEND_RETRY_SEC)
+        try:
+            with _g2_lock:
+                status, sdate = g2works.attend(*cred, datetime.datetime.now().strftime("%H%M"))
+        except g2works.G2Error as e:  # 로그인 실패 등은 다시 해도 같으므로 바로 알림
+            log.error("출근 처리 실패: %s", e)
+            msgbox("출근 자동 처리에 실패했습니다.\n\n%s" % e, MB_OK | MB_ICONERROR)
+            return
+        except Exception as e:  # 네트워크 오류 등 → 재시도
+            log.warning("출근 처리 오류 (%d/%d): %s", attempt + 1, 1 + ATTEND_RETRIES, e)
+            continue
+
+        if status == "done":
+            log.info("출근 처리 완료 (%s)", sdate)
+            icon.notify("출근 처리되었습니다. (%s)" % sdate[11:16], TITLE)
+        elif status == "already":
+            log.info("이미 출근 기록 있음 (%s)", sdate)
+        else:
+            log.info("출근 불가 시간대라 건너뜀")
+        return
+
+    log.error("출근 처리 실패: 재시도 %d번 모두 실패", ATTEND_RETRIES)
+    msgbox("출근 자동 처리에 실패했습니다.\n네트워크 연결을 확인한 뒤 G2Works에서 직접 출근을 찍어 주세요.",
+           MB_OK | MB_ICONERROR)
+
+
 # ---------- 트레이 메뉴 ----------
 
 def open_settings_process():
@@ -132,39 +174,58 @@ def open_settings_process():
 def run_tray():
     import pystray
 
+    # 메뉴 처리 함수는 트레이 아이콘의 메시지 처리 안에서 실행되므로,
+    # 확인 창은 별도 스레드에서 띄우고 창이 떠 있는 동안 다른 메뉴는 무시한다
+    dialog_lock = threading.Lock()
+
+    def in_background(work):
+        def handler(icon, item):
+            if not dialog_lock.acquire(blocking=False):
+                return
+
+            def run():
+                try:
+                    work(icon)
+                finally:
+                    dialog_lock.release()
+            threading.Thread(target=run, daemon=True).start()
+        return handler
+
     def title(item):
         return "퇴근 기준 시각 %s" % config.leave_time_text(config.load())
 
     def on_settings(icon, item):
         open_settings_process()
 
-    def on_leave_now(icon, item):
-        def work():
-            if not ask("지금 퇴근을 찍을까요?"):
-                return
-            ok, message = do_leave()
-            (log.info if ok else log.error)("수동 퇴근: %s", message)
-            msgbox(message, MB_OK | (MB_ICONINFORMATION if ok else MB_ICONERROR))
-        threading.Thread(target=work, daemon=True).start()
+    def leave_now(icon):
+        if not ask("지금 퇴근을 찍을까요?"):
+            return
+        ok, message = do_leave()
+        (log.info if ok else log.error)("수동 퇴근: %s", message)
+        msgbox(message, MB_OK | (MB_ICONINFORMATION if ok else MB_ICONERROR))
 
     def on_open_logs(icon, item):
         os.makedirs(config.LOG_DIR, exist_ok=True)
         os.startfile(config.LOG_DIR)
 
-    def on_quit(icon, item):
-        if ask("프로그램을 끄면 다음 로그인 전까지 자동 퇴근이 동작하지 않습니다.\n끌까요?"):
+    def quit_app(icon):
+        if ask("프로그램을 끄면 다음 로그인 전까지 자동 출퇴근이 동작하지 않습니다.\n끌까요?"):
             log.info("사용자가 프로그램을 끔")
             icon.stop()
 
-    def on_uninstall(icon, item):
+    def uninstall(icon):
         if not ask("gohome을 제거할까요?\n\n시작 프로그램 등록과 저장된 사번/비밀번호가 삭제되고, "
-                   "더 이상 자동 퇴근이 동작하지 않습니다."):
+                   "더 이상 자동 출퇴근이 동작하지 않습니다."):
             return
         log.info("제거")
         installer.uninstall()
         msgbox("제거했습니다.\n필요 없으면 gohome.exe가 있는 폴더를 직접 삭제해 주세요.\n\n%s"
                % config.BASE_DIR)
         icon.stop()
+
+    on_leave_now = in_background(leave_now)
+    on_quit = in_background(quit_app)
+    on_uninstall = in_background(uninstall)
 
     menu = pystray.Menu(
         pystray.MenuItem(title, None, enabled=False),
@@ -176,7 +237,12 @@ def run_tray():
         pystray.MenuItem("프로그램 끄기", on_quit),
         pystray.MenuItem("제거", on_uninstall),
     )
-    pystray.Icon(TITLE, app_icon.make(), "gohome - 퇴근 자동 처리", menu).run()
+
+    def setup(icon):
+        icon.visible = True
+        threading.Thread(target=auto_attend, args=(icon,), daemon=True).start()
+
+    pystray.Icon(TITLE, app_icon.make(), "gohome - 출퇴근 자동 처리", menu).run(setup=setup)
 
 
 # ---------- 진입점 ----------
@@ -205,6 +271,8 @@ def main():
     log.info("상주 시작 (퇴근 기준 시각 %s)", config.leave_time_text(config.load()))
     run_tray()
     log.info("===== 종료 =====")
+    logging.shutdown()
+    os._exit(0)  # 남아 있는 스레드(종료 감지, 출근 재시도 등)와 관계없이 확실히 종료
 
 
 if __name__ == "__main__":

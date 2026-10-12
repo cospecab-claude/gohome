@@ -16,7 +16,9 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
 BASE_URL = "https://cospecab.g2works.kr"
+ATTEND_KIND = "900787"  # 출근하기 attend('900787')
 LEAVE_KIND = "900788"  # 퇴근하기 attend('900788')
+DEFAULT_ATTEND_END = "0500"  # 이 시각까지는 출근 불가 (사이트 기본값)
 TIMEOUT = 10
 EMPTY_DATE = "0000-00-00 00:00:00"
 
@@ -95,9 +97,10 @@ class G2Client:
             raise G2Error("출퇴근 상태 조회 실패")
         return info
 
-    def send_leave(self, is_attend_new):
+    def send_attend(self, is_attend_new, kind):
+        """출근(ATTEND_KIND) 또는 퇴근(LEAVE_KIND) 요청."""
         cmd = "attendPostNew" if is_attend_new else "attendPost1"
-        return self._post("/emp.auth.do?command=" + cmd, {"kind": LEAVE_KIND}).get("jsonMessage", {})
+        return self._post("/emp.auth.do?command=" + cmd, {"kind": kind}).get("jsonMessage", {})
 
 
 def has_attend(today):
@@ -114,7 +117,7 @@ def leave(emp_no, password):
     if not has_attend(info.get("attendInfo") or {}):
         raise G2Error(MSG_NO_ATTEND)
 
-    res = c.send_leave(bool(info.get("isAttendNew")))
+    res = c.send_attend(bool(info.get("isAttendNew")), LEAVE_KIND)
     if res.get("result") == "fail":
         raise G2Error("퇴근 요청 실패: %s" % res.get("message"))
 
@@ -122,6 +125,35 @@ def leave(emp_no, password):
     if edate == EMPTY_DATE:
         raise G2Error("퇴근 요청 후에도 퇴근 기록이 없습니다: %s" % res.get("message"))
     return edate
+
+
+def attend(emp_no, password, now_hhmm):
+    """출근 처리. (상태, 출근 시각)을 돌려주고, 실패하면 G2Error.
+
+    상태: "done" 이번에 출근 처리함 / "already" 이미 출근 기록 있음 / "too_early" 출근 불가 시간대
+    """
+    c = G2Client()
+    c.login(emp_no, password)
+    info = c.attend_info()
+    today = info.get("attendInfo") or {}
+    if has_attend(today):
+        return "already", today.get("sdate")
+
+    # 사이트 규칙: 00:00 ~ 전일 퇴근 마감 시각(기본 05:00)에는 출근 불가
+    attend_end = info.get("prevLeaveTime") or ""
+    if attend_end in ("", "0000"):
+        attend_end = DEFAULT_ATTEND_END
+    if now_hhmm <= attend_end:
+        return "too_early", None
+
+    res = c.send_attend(bool(info.get("isAttendNew")), ATTEND_KIND)
+    if res.get("result") == "fail":
+        raise G2Error("출근 요청 실패: %s" % res.get("message"))
+
+    today = c.attend_info().get("attendInfo") or {}
+    if not has_attend(today):
+        raise G2Error("출근 요청 후에도 출근 기록이 없습니다: %s" % res.get("message"))
+    return "done", today.get("sdate")
 
 
 def check_login(emp_no, password):

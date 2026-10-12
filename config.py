@@ -13,7 +13,7 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 FAIL_FLAG = os.path.join(BASE_DIR, "fail_flag.txt")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-DEFAULTS = {"leave_hour": 18, "leave_minute": 0}
+DEFAULTS = {"leave_hour": 18, "leave_minute": 0, "auto_attend": True}
 
 
 def load():

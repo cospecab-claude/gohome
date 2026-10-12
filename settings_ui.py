@@ -50,6 +50,10 @@ def run(first_time=False):
     tk.Label(frm, text="이 시각 이후에 PC를 끄면 자동으로 퇴근을 찍습니다.", fg="gray").grid(
         row=5, column=0, columnspan=4, sticky="w")
 
+    attend_var = tk.BooleanVar(value=cfg["auto_attend"])
+    tk.Checkbutton(frm, text="PC를 켜면 출근 자동 처리 (오늘 출근 기록이 없을 때만)",
+                   variable=attend_var).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
     def on_save():
         emp = emp_var.get().strip()
         pw = pw_var.get() or (saved_cred[1] if saved_cred and emp == saved_cred[0] else "")
@@ -75,14 +79,15 @@ def run(first_time=False):
         root.config(cursor="")
 
         credential.save(emp, pw)
-        cfg.update(leave_hour=hour, leave_minute=minute)
+        cfg.update(leave_hour=hour, leave_minute=minute, auto_attend=attend_var.get())
         config.save(cfg)
         result["saved"] = True
-        messagebox.showinfo(TITLE, "저장했습니다.\n퇴근 기준 시각: %02d:%02d" % (hour, minute), parent=root)
+        messagebox.showinfo(TITLE, "저장했습니다.\n퇴근 기준 시각: %02d:%02d\n출근 자동 처리: %s"
+                            % (hour, minute, "사용" if cfg["auto_attend"] else "사용 안 함"), parent=root)
         root.destroy()
 
     btns = tk.Frame(frm)
-    btns.grid(row=6, column=0, columnspan=4, sticky="e", pady=(12, 0))
+    btns.grid(row=7, column=0, columnspan=4, sticky="e", pady=(12, 0))
     tk.Button(btns, text="로그인 확인 후 저장", command=on_save, width=18).pack(side="left", padx=4)
     tk.Button(btns, text="취소", command=root.destroy, width=8).pack(side="left")
 
