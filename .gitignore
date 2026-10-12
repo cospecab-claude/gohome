@@ -1,0 +1,14 @@
+*.pyc
+__pycache__/
+Thumbs.db
+desktop.ini
+*.log
+*.bak
+*~
+logs/
+fail_flag.txt
+config.json
+build/
+dist/
+*.spec
+gohome.ico
